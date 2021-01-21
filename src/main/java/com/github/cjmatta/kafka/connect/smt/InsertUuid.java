@@ -20,6 +20,7 @@ import org.apache.kafka.common.cache.Cache;
 import org.apache.kafka.common.cache.LRUCache;
 import org.apache.kafka.common.cache.SynchronizedCache;
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
@@ -30,9 +31,12 @@ import org.apache.kafka.connect.transforms.Transformation;
 import org.apache.kafka.connect.transforms.util.SchemaUtil;
 import org.apache.kafka.connect.transforms.util.SimpleConfig;
 
+import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import static org.apache.kafka.connect.transforms.util.Requirements.requireMap;
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
@@ -44,15 +48,19 @@ public abstract class InsertUuid<R extends ConnectRecord<R>> implements Transfor
 
   private interface ConfigName {
     String UUID_FIELD_NAME = "uuid.field.name";
+    String PATTERN = "pattern";
   }
 
   public static final ConfigDef CONFIG_DEF = new ConfigDef()
     .define(ConfigName.UUID_FIELD_NAME, ConfigDef.Type.STRING, "uuid", ConfigDef.Importance.HIGH,
-      "Field name for UUID");
+      "Field name for UUID")
+          .define(ConfigName.PATTERN, ConfigDef.Type.STRING, ".*", ConfigDef.Importance.HIGH,
+                  "Regex pattern");
 
   private static final String PURPOSE = "adding UUID to record";
 
   private String fieldName;
+  private Pattern pattern;
 
   private Cache<Schema, Schema> schemaUpdateCache;
 
@@ -60,6 +68,12 @@ public abstract class InsertUuid<R extends ConnectRecord<R>> implements Transfor
   public void configure(Map<String, ?> props) {
     final SimpleConfig config = new SimpleConfig(CONFIG_DEF, props);
     fieldName = config.getString(ConfigName.UUID_FIELD_NAME);
+
+    try {
+      pattern = Pattern.compile(config.getString(ConfigName.PATTERN));
+    } catch (PatternSyntaxException var4) {
+      throw new ConfigException("pattern", pattern, String.format("Could not compile regex '%s'.", pattern));
+    }
 
     schemaUpdateCache = new SynchronizedCache<>(new LRUCache<Schema, Schema>(16));
   }
@@ -85,23 +99,18 @@ public abstract class InsertUuid<R extends ConnectRecord<R>> implements Transfor
   }
 
   private R applyWithSchema(R record) {
-    final Struct value = requireStruct(operatingValue(record), PURPOSE);
 
-    Schema updatedSchema = schemaUpdateCache.get(value.schema());
-    if(updatedSchema == null) {
-      updatedSchema = makeUpdatedSchema(value.schema());
-      schemaUpdateCache.put(value.schema(), updatedSchema);
+    final Schema outputSchema = Schema.STRING_SCHEMA;
+    String output = new String((byte[]) record.value(), Charset.forName("UTF-8"));
+
+    if (pattern.matcher(output).matches()) {
+
+      return newRecord(record, outputSchema, output.getBytes());
+
+    } else {
+      return null;
     }
 
-    final Struct updatedValue = new Struct(updatedSchema);
-
-    for (Field field : value.schema().fields()) {
-      updatedValue.put(field.name(), value.get(field));
-    }
-
-    updatedValue.put(fieldName, getRandomUuid());
-
-    return newRecord(record, updatedSchema, updatedValue);
   }
 
   @Override
